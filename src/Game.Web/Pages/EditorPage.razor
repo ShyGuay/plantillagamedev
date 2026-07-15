@@ -1,0 +1,367 @@
+@page "/"
+@implements IDisposable
+@inject HttpClient Http
+@inject IJSRuntime Js
+
+<main class="editor-shell" tabindex="0" @onkeydown="OnKeyDown" @onkeyup="OnKeyUp">
+  @if (_session is null)
+  {
+    <div class="loading">Loading editor...</div>
+  }
+  else
+  {
+    <header class="topbar">
+      <div>
+        <strong>@_session.Scene.Name</strong>
+        <span>@StatusText</span>
+      </div>
+      <div class="toolbar">
+        @if (_session.IsPlaying)
+        {
+          <button @onclick="StopPlay">Stop</button>
+          <button @onclick="ResetPlay">Reset</button>
+        }
+        else
+        {
+          <button class="primary" @onclick="StartPlay">Play</button>
+        }
+        <button @onclick="AddGoal">Add Goal</button>
+        <button @onclick="DuplicateSelected" disabled="@(_session.SelectedEntity is null)">Duplicate</button>
+        <button @onclick="DeleteSelected" disabled="@(!CanDeleteSelected)">Delete</button>
+        <button @onclick="ExportJson">Export JSON</button>
+      </div>
+    </header>
+
+    <section class="workspace">
+      <aside class="panel hierarchy">
+        <h2>Scene</h2>
+        @foreach (var entity in _session.Scene.Entities)
+        {
+          <button class="entity-row @SelectedClass(entity)" @onclick="() => Select(entity.Id)">
+            <span>@entity.Name</span>
+            <small>@entity.Id</small>
+          </button>
+        }
+      </aside>
+
+      <section class="viewport-panel">
+        <div class="viewport-header">
+          <span>@(_session.IsPlaying ? "Play viewport" : "Edit viewport")</span>
+          <span>WASD / arrows while focused</span>
+        </div>
+        <svg class="viewport" viewBox="@ViewBox" role="img" aria-label="2D game viewport" @onclick="ClearSelection">
+          <rect x="0" y="0" width="@_session.Scene.Settings.WorldWidth" height="@_session.Scene.Settings.WorldHeight" fill="@BackgroundColor" />
+          @foreach (var line in GridLines())
+          {
+            <line x1="@line.X1" y1="@line.Y1" x2="@line.X2" y2="@line.Y2" class="grid-line" />
+          }
+          @if (_session.IsPlaying)
+          {
+            @foreach (var entity in _session.Runtime.State.Entities)
+            {
+              <circle cx="@entity.X" cy="@entity.Y" r="@entity.Radius" fill="@entity.Color" class="@RuntimeEntityClass(entity)" />
+              <text x="@(entity.X + entity.Radius + 6)" y="@(entity.Y + 4)" class="viewport-label">@entity.Name</text>
+            }
+          }
+          else
+          {
+            @foreach (var entity in _session.Scene.Entities)
+            {
+              var radius = _session.GetNumber(entity, "sprite", "radius", 18);
+              var color = _session.GetText(entity, "sprite", "color", "#ffffff");
+              <circle cx="@entity.Transform.X" cy="@entity.Transform.Y" r="@radius" fill="@color" class="@EditEntityClass(entity)" @onclick:stopPropagation="true" @onclick="() => Select(entity.Id)" />
+              <text x="@(entity.Transform.X + radius + 6)" y="@(entity.Transform.Y + 4)" class="viewport-label">@entity.Name</text>
+            }
+          }
+        </svg>
+      </section>
+
+      <aside class="panel inspector">
+        <h2>Inspector</h2>
+        @if (Selected is null)
+        {
+          <p class="muted">Select an entity in the hierarchy or viewport.</p>
+        }
+        else
+        {
+          <label>
+            Name
+            <input value="@Selected.Name" @onchange="SetName" />
+          </label>
+          <div class="field-grid">
+            <label>
+              X
+              <input type="number" value="@Format(Selected.Transform.X)" @onchange="SetX" />
+            </label>
+            <label>
+              Y
+              <input type="number" value="@Format(Selected.Transform.Y)" @onchange="SetY" />
+            </label>
+            <label>
+              Scale X
+              <input type="number" step="0.1" value="@Format(Selected.Transform.ScaleX)" @onchange="SetScaleX" />
+            </label>
+            <label>
+              Scale Y
+              <input type="number" step="0.1" value="@Format(Selected.Transform.ScaleY)" @onchange="SetScaleY" />
+            </label>
+          </div>
+          <label>
+            Sprite asset
+            <input value="@_session.GetText(Selected, "sprite", "asset", "placeholder")" @onchange="SetSpriteAsset" />
+          </label>
+          <label>
+            Color
+            <input type="color" value="@_session.GetText(Selected, "sprite", "color", "#ffffff")" @onchange="SetSpriteColor" />
+          </label>
+          <label>
+            Radius
+            <input type="range" min="6" max="64" value="@Format(_session.GetNumber(Selected, "sprite", "radius", 18))" @onchange="SetSpriteRadius" />
+          </label>
+
+          @if (_session.HasComponent(Selected, "playerController"))
+          {
+            <h3>Player Controller</h3>
+            <label>
+              Move speed
+              <input type="number" min="20" max="640" value="@Format(_session.GetNumber(Selected, "playerController", "moveSpeed", 160))" @onchange="SetMoveSpeed" />
+            </label>
+          }
+
+          @if (_session.HasComponent(Selected, "goal"))
+          {
+            <h3>Goal</h3>
+            <label>
+              Trigger radius
+              <input type="number" min="8" max="128" value="@Format(_session.GetNumber(Selected, "goal", "radius", 34))" @onchange="SetGoalRadius" />
+            </label>
+            <label>
+              Win message
+              <input value="@_session.GetText(Selected, "goal", "message", "Slice complete")" @onchange="SetGoalMessage" />
+            </label>
+          }
+        }
+      </aside>
+    </section>
+
+    @if (!string.IsNullOrWhiteSpace(_exportedJson))
+    {
+      <section class="export-panel">
+        <div>
+          <strong>Exported scene JSON</strong>
+          <span>Copy this into content/scenes/main.scene.json.</span>
+        </div>
+        <textarea readonly>@_exportedJson</textarea>
+      </section>
+    }
+  }
+</main>
+
+@code {
+    private readonly CancellationTokenSource _loopCancellation = new();
+    private readonly HashSet<string> _pressedKeys = [];
+    private EditorSession? _session;
+    private string _exportedJson = "";
+
+    private EntityDocument? Selected => _session?.SelectedEntity;
+    private string ViewBox => _session is null ? "0 0 960 540" : $"0 0 {_session.Scene.Settings.WorldWidth} {_session.Scene.Settings.WorldHeight}";
+    private string BackgroundColor => _session?.Scene.Settings.BackgroundColor ?? "#15191f";
+    private bool CanDeleteSelected => Selected is not null && !_session!.HasComponent(Selected, "playerController");
+    private string StatusText => _session is null
+        ? ""
+        : _session.IsPlaying
+            ? _session.Runtime.State.Message
+            : "Edit mode";
+
+    protected override async Task OnInitializedAsync()
+    {
+        SceneDocument scene;
+        try
+        {
+            var json = await Http.GetStringAsync("content/scenes/main.scene.json");
+            scene = SceneJson.Deserialize(json);
+        }
+        catch
+        {
+            scene = SampleContent.CreateScene();
+        }
+
+        _session = new EditorSession(scene);
+        _ = RunLoop();
+    }
+
+    private async Task RunLoop()
+    {
+        var last = DateTimeOffset.UtcNow;
+        while (!_loopCancellation.IsCancellationRequested)
+        {
+            await Task.Delay(16, _loopCancellation.Token).ContinueWith(_ => { });
+            if (_loopCancellation.IsCancellationRequested || _session is null || !_session.IsPlaying)
+            {
+                last = DateTimeOffset.UtcNow;
+                continue;
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            var delta = (now - last).TotalSeconds;
+            last = now;
+            _session.Step(CurrentInput(), delta);
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private InputSnapshot CurrentInput()
+    {
+        return new InputSnapshot(
+            Up: IsPressed("w") || IsPressed("arrowup"),
+            Down: IsPressed("s") || IsPressed("arrowdown"),
+            Left: IsPressed("a") || IsPressed("arrowleft"),
+            Right: IsPressed("d") || IsPressed("arrowright"),
+            PrimaryAction: IsPressed(" "),
+            Restart: IsPressed("r"));
+    }
+
+    private bool IsPressed(string key)
+    {
+        return _pressedKeys.Contains(key);
+    }
+
+    private void OnKeyDown(KeyboardEventArgs args)
+    {
+        _pressedKeys.Add(args.Key.ToLowerInvariant());
+        if (_session is not null && !_session.IsPlaying)
+        {
+            var step = args.ShiftKey ? 32 : 8;
+            if (args.Key is "ArrowUp") _session?.MoveSelected(0, -step);
+            if (args.Key is "ArrowDown") _session?.MoveSelected(0, step);
+            if (args.Key is "ArrowLeft") _session?.MoveSelected(-step, 0);
+            if (args.Key is "ArrowRight") _session?.MoveSelected(step, 0);
+        }
+    }
+
+    private void OnKeyUp(KeyboardEventArgs args)
+    {
+        _pressedKeys.Remove(args.Key.ToLowerInvariant());
+    }
+
+    private void StartPlay() => _session?.StartPlay();
+    private void StopPlay() => _session?.StopPlay();
+    private void ResetPlay() => _session?.ResetPlay();
+    private void AddGoal() => _session?.AddGoal();
+    private void DuplicateSelected() => _session?.DuplicateSelected();
+    private void DeleteSelected() => _session?.DeleteSelected();
+    private void Select(string id) => _session?.Select(id);
+    private void ClearSelection() { }
+
+    private async Task ExportJson()
+    {
+        if (_session is null)
+        {
+            return;
+        }
+
+        _exportedJson = _session.ExportJson();
+        await Js.InvokeVoidAsync("editorStorage.copyText", _exportedJson);
+    }
+
+    private string SelectedClass(EntityDocument entity) => entity.Id == _session?.SelectedEntityId ? "selected" : "";
+    private string EditEntityClass(EntityDocument entity) => entity.Id == _session?.SelectedEntityId ? "entity selected-shape" : "entity";
+    private static string RuntimeEntityClass(RuntimeEntity entity) => entity.IsPlayer ? "entity player" : entity.IsGoal ? "entity goal" : "entity";
+
+    private IEnumerable<(double X1, double Y1, double X2, double Y2)> GridLines()
+    {
+        if (_session is null)
+        {
+            yield break;
+        }
+
+        const int spacing = 32;
+        for (var x = 0; x <= _session.Scene.Settings.WorldWidth; x += spacing)
+        {
+            yield return (x, 0, x, _session.Scene.Settings.WorldHeight);
+        }
+
+        for (var y = 0; y <= _session.Scene.Settings.WorldHeight; y += spacing)
+        {
+            yield return (0, y, _session.Scene.Settings.WorldWidth, y);
+        }
+    }
+
+    private void SetName(ChangeEventArgs args)
+    {
+        if (Selected is not null) Selected.Name = Text(args, Selected.Name);
+    }
+
+    private void SetX(ChangeEventArgs args)
+    {
+        if (Selected is not null) Selected.Transform.X = Number(args, Selected.Transform.X);
+    }
+
+    private void SetY(ChangeEventArgs args)
+    {
+        if (Selected is not null) Selected.Transform.Y = Number(args, Selected.Transform.Y);
+    }
+
+    private void SetScaleX(ChangeEventArgs args)
+    {
+        if (Selected is not null) Selected.Transform.ScaleX = Number(args, Selected.Transform.ScaleX);
+    }
+
+    private void SetScaleY(ChangeEventArgs args)
+    {
+        if (Selected is not null) Selected.Transform.ScaleY = Number(args, Selected.Transform.ScaleY);
+    }
+
+    private void SetSpriteAsset(ChangeEventArgs args)
+    {
+        if (Selected is not null) _session?.SetText(Selected, "sprite", "asset", Text(args, "placeholder"));
+    }
+
+    private void SetSpriteColor(ChangeEventArgs args)
+    {
+        if (Selected is not null) _session?.SetText(Selected, "sprite", "color", Text(args, "#ffffff"));
+    }
+
+    private void SetSpriteRadius(ChangeEventArgs args)
+    {
+        if (Selected is not null) _session?.SetNumber(Selected, "sprite", "radius", Number(args, 18));
+    }
+
+    private void SetMoveSpeed(ChangeEventArgs args)
+    {
+        if (Selected is not null) _session?.SetNumber(Selected, "playerController", "moveSpeed", Number(args, 160));
+    }
+
+    private void SetGoalRadius(ChangeEventArgs args)
+    {
+        if (Selected is not null) _session?.SetNumber(Selected, "goal", "radius", Number(args, 34));
+    }
+
+    private void SetGoalMessage(ChangeEventArgs args)
+    {
+        if (Selected is not null) _session?.SetText(Selected, "goal", "message", Text(args, "Slice complete"));
+    }
+
+    private static double Number(ChangeEventArgs args, double fallback)
+    {
+        return double.TryParse(args.Value?.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
+            ? value
+            : fallback;
+    }
+
+    private static string Text(ChangeEventArgs args, string fallback)
+    {
+        return args.Value?.ToString() ?? fallback;
+    }
+
+    private static string Format(double value)
+    {
+        return value.ToString("0.###", CultureInfo.InvariantCulture);
+    }
+
+    public void Dispose()
+    {
+        _loopCancellation.Cancel();
+        _loopCancellation.Dispose();
+    }
+}

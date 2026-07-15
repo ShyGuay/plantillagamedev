@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "id": "template-main",
+  "name": "Template Main Scene",
+  "settings": {
+    "backgroundColor": "#15191f",
+    "pixelsPerUnit": 32,
+    "worldWidth": 960,
+    "worldHeight": 540
+  },
+  "entities": [
+    {
+      "id": "player",
+      "name": "Player",
+      "prefab": "actor.player",
+      "transform": {
+        "x": 160,
+        "y": 270,
+        "rotation": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "components": {
+        "sprite": {
+          "asset": "placeholder-player",
+          "color": "#4aa3ff",
+          "radius": 18
+        },
+        "playerController": {
+          "moveSpeed": 180
+        }
+      }
+    },
+    {
+      "id": "goal",
+      "name": "Goal",
+      "prefab": "marker.goal",
+      "transform": {
+        "x": 780,
+        "y": 270,
+        "rotation": 0,
+        "scaleX": 1,
+        "scaleY": 1
+      },
+      "components": {
+        "sprite": {
+          "asset": "placeholder-goal",
+          "color": "#7bd88f",
+          "radius": 24
+        },
+        "goal": {
+          "radius": 34,
+          "message": "Slice completada"
+        }
+      }
+    }
+  ]
+}
